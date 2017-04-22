@@ -51,6 +51,10 @@ TEST1    7-0:TEST1
 TEST0    7-2:TEST0|6-1 1:VCO_SEL_CAL_EN 0:TEST0
 """
 
+dfl_values = binascii.unhexlify('29 2E 3F 07 D3 91 FF 04 45 00 00 0F 00 5E C4 EC 8C 22 02 22 F8 47 07 30 04 76 6C 03 40 91 87 6B F8 56 10 A9 0A 20 0D 41 00 59 7F 3F 88 31 0B'.replace(' ', ''))
+
+# Functions for parsing reg_data
+
 def parse_bitrange(s, check=True):
 	if '-' in s:
 		msb, lsb = map(int, s.split('-'))
@@ -61,36 +65,15 @@ def parse_bitrange(s, check=True):
 		assert not check or bit in range(8)
 		return (bit, bit)
 
-def format_bitrange(bits):
-	msb, lsb = bits
-	if msb == lsb:
-		return str(msb)
-	return '%d:%d' % (msb, lsb)
-
 def expand_bitrange(bits):
 	msb, lsb = bits
 	return list(range(lsb, msb + 1))
-
-def format_masked_value(value, bits, width=8):
-	ret = ['.'] * width
-	for bit in range(width):
-		if bit in bits:
-			ret[bit] = str((value >> bit) & 1)
-	return ''.join(reversed(ret))
-
-def format_masked_values(old_value, new_value, bits, width=8):
-	old = format_masked_value(old_value, bits, width)
-	new = format_masked_value(new_value, bits, width)
-	colors = [(32 if old_char == new_char else 31) if bit in bits else 0 for bit, (old_char, new_char) in enumerate(reversed(list(zip(old, new))))][::-1]
-	colors = ['\x1b[%dm' % color for color in colors]
-	old = ''.join(item for pair in zip(colors, old) for item in pair) + '\x1b[m'
-	new = ''.join(item for pair in zip(colors, new) for item in pair) + '\x1b[m'
-	return ' '.join([old, new])
 
 def parse_reg_defs(reg_data):
 	reg_defs = []
 	field_defs = {}
 	for line in reg_data.strip().split('\n'):
+		# Ignore comments, skip empty lines
 		line = line.split('#')[0].strip()
 		if not line:
 			continue
@@ -112,6 +95,7 @@ def parse_reg_defs(reg_data):
 			if '|' in field_name:
 				field_name, field_bits = field_name.split('|')
 				field_bits = parse_bitrange(field_bits, check=False)
+				# Check that field and register sizes agree
 				assert field_bits[0] - field_bits[1] == reg_bits[0] - reg_bits[1]
 			else:
 				field_bits = (reg_bits[0] - reg_bits[1], 0)
@@ -119,10 +103,12 @@ def parse_reg_defs(reg_data):
 			reg_fields.append((reg_bits, field_name, field_bits))
 			field_defs.setdefault(field_name, []).append((field_bits, reg_name, reg_bits))
 
+		# Check that all bits of registers are defined
 		assert sorted(used_bits) == list(range(8))
 
 		reg_defs.append((reg_name, reg_fields))
 
+	# Check that there is no overlap or holes in field bit definitions
 	for field_name, fields in field_defs.items():
 		used_bits = []
 		for field_bits, reg_name, reg_bits in fields:
@@ -131,6 +117,12 @@ def parse_reg_defs(reg_data):
 		assert used_bits == list(range(used_bits[-1] + 1))
 
 	return reg_defs, field_defs
+
+# Parse reg_data
+reg_defs, field_defs = parse_reg_defs(reg_data)
+reg2addr = {name: addr for addr, (name, fields) in enumerate(reg_defs)}
+
+# Functions for extracting field values from register values
 
 def extract_field(field_parts, values):
 	width = max(field_bits[0] for field_bits, reg_name, reg_bits in field_parts) + 1
@@ -150,6 +142,32 @@ def extract_fields(reg_values):
 		value = extract_field(fields, reg_values)
 		values[field_name] = value
 	return values
+
+# Functions for formatting things for output
+
+def format_bitrange(bits):
+	msb, lsb = bits
+	if msb == lsb:
+		return str(msb)
+	return '%d:%d' % (msb, lsb)
+
+def format_masked_value(value, bits, width=8):
+	ret = ['.'] * width
+	for bit in range(width):
+		if bit in bits:
+			ret[bit] = str((value >> bit) & 1)
+	return ''.join(reversed(ret))
+
+def format_masked_values(old_value, new_value, bits, width=8):
+	old = format_masked_value(old_value, bits, width)
+	new = format_masked_value(new_value, bits, width)
+	colors = [(32 if old_char == new_char else 31) if bit in bits else 0 for bit, (old_char, new_char) in enumerate(reversed(list(zip(old, new))))][::-1]
+	colors = ['\x1b[%dm' % color for color in colors]
+	old = ''.join(item for pair in zip(colors, old) for item in pair) + '\x1b[m'
+	new = ''.join(item for pair in zip(colors, new) for item in pair) + '\x1b[m'
+	return ' '.join([old, new])
+
+# Functions for output
 
 def dump_regs(reg_values):
 	for addr, ((reg_name, reg_fields), reg_value) in enumerate(zip(reg_defs, reg_values)):
@@ -208,11 +226,6 @@ def dump_diff(old_values, new_values):
 	for vals in [olds, news]:
 		dump_derived(vals)
 		print()
-
-reg_defs, field_defs = parse_reg_defs(reg_data)
-reg2addr = {name: addr for addr, (name, fields) in enumerate(reg_defs)}
-
-dfl_values = binascii.unhexlify('29 2E 3F 07 D3 91 FF 04 45 00 00 0F 00 5E C4 EC 8C 22 02 22 F8 47 07 30 04 76 6C 03 40 91 87 6B F8 56 10 A9 0A 20 0D 41 00 59 7F 3F 88 31 0B'.replace(' ', ''))
 
 if __name__ == '__main__':
 	import sys
