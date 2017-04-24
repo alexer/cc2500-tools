@@ -153,6 +153,22 @@ def spread_field(field_parts, values, value):
 			reg_value = (reg_value & ~(1 << reg_bit)) | (((value >> field_bit) & 1) << reg_bit)
 		values[reg_addr] = reg_value
 
+def extract_float(vals, name):
+	m_width = max(field_bits[0] for field_bits, reg_name, reg_bits in field_defs[name + '_M']) + 1
+	return (2**m_width + vals[name + '_M']) * 2**vals[name + '_E']
+
+def spread_float(vals, name, val):
+	m_width = max(field_bits[0] for field_bits, reg_name, reg_bits in field_defs[name + '_M']) + 1
+	e_width = max(field_bits[0] for field_bits, reg_name, reg_bits in field_defs[name + '_E']) + 1
+
+	e = val.bit_length() - m_width - 1
+	m = val // 2**e - 2**m_width
+
+	assert 0 <= m < 2**m_width and 0 <= e < 2**e_width
+
+	vals[name + '_M'] = m
+	vals[name + '_E'] = e
+
 # Functions for formatting things for output
 
 def format_bitrange(bits):
@@ -197,10 +213,10 @@ def dump_derived(vals):
 	fif = fxosc / 2**10 * vals['FREQ_IF']
 	freqoff = fxtal / 2**14 * ((vals['FREQOFF'] & 0x7f) - (vals['FREQOFF'] & 0x80))
 	fcarrier = fxosc / 2**16 * vals['FREQ']
-	bwchannel = fxosc / (8 * (4 + vals['CHANBW_M']) * 2**vals['CHANBW_E'])
-	rdata = (256 + vals['DRATE_M']) * 2**vals['DRATE_E'] / 2**28 * fxosc
-	dfchannel = fxosc / 2**18 * (256 + vals['CHANSPC_M']) * 2**vals['CHANSPC_E']
-	fdev = fxosc / 2**17 * (8 + vals['DEVIATION_M']) * 2**vals['DEVIATION_E']
+	bwchannel = fxosc / (8 * extract_float(vals, 'CHANBW'))
+	rdata = extract_float(vals, 'DRATE') / 2**28 * fxosc
+	dfchannel = fxosc / 2**18 * extract_float(vals, 'CHANSPC')
+	fdev = fxosc / 2**17 * extract_float(vals, 'DEVIATION')
 
 	print('fif:', fif / 1e3)
 	print('freqoff:', freqoff / 1e3)
