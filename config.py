@@ -143,6 +143,16 @@ def extract_fields(reg_values):
 		values[field_name] = value
 	return values
 
+def spread_field(field_parts, values, value):
+	for field_bits, reg_name, reg_bits in field_parts:
+		reg_addr = reg2addr[reg_name]
+		reg_value = values[reg_addr]
+		for bit in range(reg_bits[0] - reg_bits[1] + 1):
+			field_bit = field_bits[1] + bit
+			reg_bit = reg_bits[1] + bit
+			reg_value = (reg_value & ~(1 << reg_bit)) | (((value >> field_bit) & 1) << reg_bit)
+		values[reg_addr] = reg_value
+
 # Functions for formatting things for output
 
 def format_bitrange(bits):
@@ -226,6 +236,49 @@ def dump_diff(old_values, new_values):
 	for vals in [olds, news]:
 		dump_derived(vals)
 		print()
+
+# Classes
+
+class CC2500Config:
+	def __init__(self, reg_values=dfl_values, fxosc=26e6):
+		self.reg_values = list(reg_values)
+		self.reg = RegAccess(self)
+		self.field = FieldAccess(self)
+
+	def __getitem__(self, key):
+		return self.reg_values[key]
+
+	def __setitem__(self, key, value):
+		self.reg_values[key] = value
+
+	@classmethod
+	def fromhex(cls, hexstr, fxosc=26e6):
+		reg_values = binascii.unhexlify(hexstr.replace(' ', ''))
+		return cls(reg_values, fxosc)
+
+class Access:
+	def __init__(self, config):
+		self.__dict__['config'] = config
+
+	def __getattr__(self, key):
+		return self[key]
+
+	def __setattr__(self, key, value):
+		self[key] = value
+
+class RegAccess(Access):
+	def __getitem__(self, key):
+		return self.config[reg2addr[key]]
+
+	def __setitem__(self, key, value):
+		self.config[reg2addr[key]] = value
+
+class FieldAccess(Access):
+	def __getitem__(self, key):
+		return extract_field(field_defs[key], self.config)
+
+	def __setitem__(self, key, value):
+		spread_field(field_defs[key], self.config, value)
 
 if __name__ == '__main__':
 	import sys
