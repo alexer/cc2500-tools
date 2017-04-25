@@ -122,7 +122,7 @@ def parse_reg_defs(reg_data):
 reg_defs, field_defs = parse_reg_defs(reg_data)
 reg2addr = {name: addr for addr, (name, fields) in enumerate(reg_defs)}
 
-# Functions for extracting field values from register values
+# Functions for extracting/spreading field/parameter values from/to register/field values
 
 def extract_field(field_parts, values):
 	width = max(field_bits[0] for field_bits, reg_name, reg_bits in field_parts) + 1
@@ -169,6 +169,35 @@ def spread_float(vals, name, val):
 	vals[name + '_M'] = m
 	vals[name + '_E'] = e
 
+def extract_freq_if(fxosc, vals):   return fxosc / 2**10 * vals['FREQ_IF']
+def extract_freqoff(fxosc, vals):   return fxosc / 2**14 * ((vals['FREQOFF'] & 0x7f) - (vals['FREQOFF'] & 0x80))
+def extract_freq(fxosc, vals):      return fxosc / 2**16 * vals['FREQ']
+def extract_chanbw(fxosc, vals):    return fxosc / (8 * extract_float(vals, 'CHANBW'))
+def extract_drate(fxosc, vals):     return fxosc / 2**28 * extract_float(vals, 'DRATE')
+def extract_chanspc(fxosc, vals):   return fxosc / 2**18 * extract_float(vals, 'CHANSPC')
+def extract_deviation(fxosc, vals): return fxosc / 2**17 * extract_float(vals, 'DEVIATION')
+
+def spread_freq_if(fxosc, vals, value):   vals['FREQ_IF'] = round(value * 2**10 / fxosc)
+def spread_freqoff(fxosc, vals, value):   vals['FREQOFF'] = round(value * 2**14 / fxosc) & 0xff
+def spread_freq(fxosc, vals, value):      vals['FREQ'] = round(value * 2**16 / fxosc)
+def spread_chanbw(fxosc, vals, value):    spread_float(vals, 'CHANBW', round(fxosc / (8 * value)))
+def spread_drate(fxosc, vals, value):     spread_float(vals, 'DRATE', round(value * 2**28 / fxosc))
+def spread_chanspc(fxosc, vals, value):   spread_float(vals, 'CHANSPC', round(value * 2**18 / fxosc))
+def spread_deviation(fxosc, vals, value): spread_float(vals, 'DEVIATION', round(value * 2**17 / fxosc))
+
+param_funcs = {
+	'freq_if': (extract_freq_if, spread_freq_if),
+	'freqoff': (extract_freqoff, spread_freqoff),
+	'freq': (extract_freq, spread_freq),
+	'chanbw': (extract_chanbw, spread_chanbw),
+	'drate': (extract_drate, spread_drate),
+	'chanspc': (extract_chanspc, spread_chanspc),
+	'deviation': (extract_deviation, spread_deviation),
+}
+
+def extract_params(fxosc, vals):
+	return {name: extract(fxosc, vals) for name, (extract, spread) in param_funcs.items()}
+
 # Functions for formatting things for output
 
 def format_bitrange(bits):
@@ -207,24 +236,11 @@ def dump_regdiff(old_values, new_values):
 		for reg_bits, field_name, field_bits in reg_fields:
 			print('     %s %s[%s]' % (format_masked_values(dfl_value, new_value, expand_bitrange(reg_bits)), field_name, format_bitrange(field_bits)))
 
-def dump_derived(vals):
-	fxosc = fxtal = 26e6
+def dump_params(vals):
+	fxosc = 26e6
 
-	fif = fxosc / 2**10 * vals['FREQ_IF']
-	freqoff = fxtal / 2**14 * ((vals['FREQOFF'] & 0x7f) - (vals['FREQOFF'] & 0x80))
-	fcarrier = fxosc / 2**16 * vals['FREQ']
-	bwchannel = fxosc / (8 * extract_float(vals, 'CHANBW'))
-	rdata = extract_float(vals, 'DRATE') / 2**28 * fxosc
-	dfchannel = fxosc / 2**18 * extract_float(vals, 'CHANSPC')
-	fdev = fxosc / 2**17 * extract_float(vals, 'DEVIATION')
-
-	print('fif:', fif / 1e3)
-	print('freqoff:', freqoff / 1e3)
-	print('fcarrier:', fcarrier / 1e6)
-	print('bwchannel:', bwchannel / 1e3)
-	print('rdata:', rdata)
-	print('dfchannel:', dfchannel)
-	print('fdev:', fdev)
+	for name, value in sorted(extract_params(fxosc, vals).items()):
+		print(name + ':', value)
 
 def dump(reg_values):
 	dump_regs(reg_values)
@@ -235,7 +251,7 @@ def dump(reg_values):
 		print(field_name, regs[field_name])
 	print()
 
-	dump_derived(regs)
+	dump_params(regs)
 	print()
 
 def dump_diff(old_values, new_values):
@@ -250,7 +266,7 @@ def dump_diff(old_values, new_values):
 	print()
 
 	for vals in [olds, news]:
-		dump_derived(vals)
+		dump_params(vals)
 		print()
 
 # Classes
@@ -258,8 +274,10 @@ def dump_diff(old_values, new_values):
 class CC2500Config:
 	def __init__(self, reg_values=dfl_values, fxosc=26e6):
 		self.reg_values = list(reg_values)
+		self.fxosc = fxosc
 		self.reg = RegAccess(self)
 		self.field = FieldAccess(self)
+		self.param = ParameterAccess(self)
 
 	def __getitem__(self, key):
 		return self.reg_values[key]
@@ -295,6 +313,13 @@ class FieldAccess(Access):
 
 	def __setitem__(self, key, value):
 		spread_field(field_defs[key], self.config, value)
+
+class ParameterAccess(Access):
+	def __getitem__(self, key):
+		return param_funcs[key][0](self.config.fxosc, self.config.field)
+
+	def __setitem__(self, key, value):
+		return param_funcs[key][1](self.config.fxosc, self.config.field, value)
 
 if __name__ == '__main__':
 	import sys
