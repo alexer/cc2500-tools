@@ -1,108 +1,192 @@
+import subprocess
 import struct
-import operator
 
-N = 512
+import parse
 
-datarate = 1001.1196136474609
+N = 1024
 
-samplerate = 44100
+class SDRConfig:
+	def __init__(self, ppm=0, lo=0, gain=0):
+		self.ppm = ppm
+		self.lo = lo
+		self.gain = gain
 
-maxsize = int(samplerate / datarate * (2 + 2 + 64 + 2) * 8)
-preamblesize = int(samplerate / datarate * 16)
-syncsize = int(samplerate / datarate * (16 + 32))
-stride = int(samplerate / datarate)
+class FMConfig:
+	def __init__(self, freq, samplerate, resamplerate=None):
+		self.freq = freq
+		self.samplerate = samplerate
+		self.resamplerate = resamplerate or samplerate
 
-windowsize = preamblesize
+class RawSamples:
+	def __init__(self, f, size, byteorder, signed):
+		self.f = f
+		self.size = size
+		self.byteorder = byteorder
+		self.signed = signed
+		self.fmt = {1: 'B', 2: 'H', 4: 'I', 8: 'L'}[size]
+		if signed:
+			self.fmt = self.fmt.lower()
+		self.fmtprefix = {'little': '<', 'big': '>'}[byteorder]
 
-SYNC = b'\xd3\x91'
+	def read(self, count):
+		data = self.f.read(self.size * count)
+		fmt = self.fmtprefix + str(len(data) // self.size) + self.fmt
+		return struct.unpack(fmt, data)
 
-sync_bits = [1, 0] * 8 + list(map(int, '{0:032b}'.format(int.from_bytes(2*SYNC, 'big'))))
+def open_fm_stream(sdr, fm):
+	args = [
+		'rtl_fm',
+		'-f', round(fm.freq - sdr.lo),
+		'-s', round(fm.samplerate),
+	]
 
-def whitening_seq():
-	v = 0x1ff
+	if fm.resamplerate != fm.samplerate:
+		args.extend(['-r', round(fm.resamplerate)])
+
+	if sdr.gain is not None:
+		args.extend(['-g', round(sdr.gain)])
+
+	if sdr.ppm:
+		args.extend(['-p', round(sdr.ppm)])
+
+	args = list(map(str, args))
+	p = subprocess.Popen(args, stdout=subprocess.PIPE)
+
+	return p, RawSamples(p.stdout, 2, 'little', True)
+
+def binarify(data):
+	"""Binary representation of bytes, similar to hexlify()"""
+	return '{0:0{1}b}'.format(int.from_bytes(data, 'big'), len(data) * 8)
+
+def unbinarify(data):
+	"""Bytes of binary representation, similar to unhexlify()"""
+	return int(data, 2).to_bytes(len(data) // 8, 'big')
+
+def parse_stream(f, conf, sdr, fm):
+	# Create search pattern
+	preamble, sync_word = parse.get_sync_data(conf)
+	pattern = list(map(int, binarify(preamble + sync_word)))
+
+	base_size, parse_packet = parse.make_parser(conf)
+
+	stride = round(round(fm.resamplerate) / conf.param.drate)
+	thsize = len(preamble) * 8 * stride
+	patsize = len(pattern) * stride
+	maxsize = (len(pattern) + (2 + 255 + 2) * 8) * stride
+
+	# Initialize window and sliding average (aka. the threshold)
+	window = list(f.read(patsize))
+	assert len(window) >= patsize >= thsize
+	threshold_sum = sum(window[:thsize-1])
+
 	while True:
-		yield v & 0xff
-		top = (v & 0x1e0)
-		v = (top ^ (top >> 4) ^ (top >> 8) ^ (v << 1) ^ (v << 5)) & 0x1ff
-
-def handle(data):
-	assert len(data) == maxsize
-
-	threshold = sum(data[:preamblesize]) / preamblesize
-
-	if [item > threshold for item in data[:syncsize:stride][:48]] != sync_bits:
-		return 0
-
-	data = [int(item > threshold) for item in data]
-	assert data[:preamblesize:stride] == [1, 0] * 8
-
-	for i in range(stride):
-		if data[i:i+preamblesize:stride] != [1, 0] * 8:
-			break
-
-	mid = i // 2
-
-	for i in range(24):
-		pos = mid + i * stride
-		if data[pos:pos+preamblesize:stride] != [1, 0] * 8:
-			return 0#pos + preamblesize
-		if data[pos:pos+syncsize:stride][:48] == sync_bits:
-			print(''.join(map(str, data[mid::stride])))
-			data = data[pos::stride]
-			break
-	else:
-		return 0#pos + preamblesize
-
-	while len(data) % 8:
-		data.pop()
-
-	data = ''.join(map(str, data))
-	data = int(data, 2).to_bytes(len(data) // 8, 'big')
-
-	assert data[:2] == b'\xaa\xaa'
-	assert data[2:6] == 2 * SYNC
-
-	data = bytes(map(operator.xor, data[6:], whitening_seq()))
-	data = data[:data[0]+1]
-
-	print(data)
-
-	return int(pos + samplerate / datarate * 8 * (6 + len(data)))
-
-def read_vals(f, count):
-	data = f.read(2 * count)
-	return struct.unpack('<' + str(len(data) // 2) + 'h', data)
-
-def parse_stream(f):
-	window = list(read_vals(f, max(N, windowsize)))
-	threshold_sum = sum(window[:windowsize])
-	threshold_sum -= window[windowsize-1]
-
-	skip = 0
-	while True:
-		vals = read_vals(f, N)
-		if not vals:
+		vals = f.read(N)
+		# The while loop can grow the buffer, so there might still be unhandled data in the buffer even if there's no more in the stream
+		if not vals and len(window) < patsize:
 			break
 
 		window.extend(vals)
 
-		count = len(window) - windowsize + 1
-		for i in range(count):
-			threshold_sum += window[i+windowsize-1]
-			if skip > 0:
-				skip -= 1
-			else:
-				threshold = int(threshold_sum / windowsize)
-				if [item > threshold for item in window[i:i+windowsize:stride]] == [1, 0] * 8:
-					if len(window) - i < maxsize:
-						window.extend(read_vals(f, maxsize))
-					skip = handle(window[i:i+maxsize])
-			threshold_sum -= window[i]
+		# Count is static so that we always drop the old data at some point
+		pos = 0
+		count = len(window) - patsize + 1
+		while pos < count:
+			# Update the sliding average
+			threshold_sum += window[pos+thsize-1]
+			threshold = int(threshold_sum / patsize)
+
+			# Look for a match
+			if all((value > threshold) == bit for value, bit in zip(window[pos:pos+patsize:stride], pattern)):
+				# Assure that there's enough data for a full packet
+				if len(window) - pos < maxsize:
+					window.extend(f.read(maxsize))
+
+				# Find middle point of stride
+				data = [int(item > threshold) for item in window[pos:pos+patsize]]
+				for i in range(1, stride):
+					if data[i:i+patsize:stride] != pattern:
+						break
+
+				mid = i // 2
+
+				# Extract bytes from [binary] window
+				data = window[pos+mid:pos+mid+maxsize:stride]
+				data = [int(item > threshold) for item in data]
+				data = ''.join(map(str, data))
+				data = unbinarify(data)
+
+				# Parse packet and calculate skip
+				try:
+					addr, payload = parse_packet(data)
+					yield (addr, payload)
+				except:
+					payload = b''
+
+				skip = (base_size + len(payload)) * 8
+				pos += skip
+
+				# Sliding window recalculation will go south if this isn't met,
+				# but above window extension should ensure it always is
+				assert pos + thsize <= len(window)
+
+				# Update sliding window if we skipped some data
+				if skip > thsize // 2:
+					threshold_sum = sum(window[pos:pos+thsize])
+				elif skip:
+					threshold_sum -= sum(window[pos-skip:pos])
+					threshold_sum += sum(window[pos-skip+thsize:pos+thsize])
+
+			threshold_sum -= window[pos]
+			pos += 1
 
 		window = window[count:]
 
+def build_fm_conf(conf):
+	# XXX: These would need to be taken account in freq
+	assert conf.param.freqoff == 0
+	assert conf.field.CHAN == 0
+
+	# XXX: Sample rate adjustments are pretty arbitrary
+	freq = conf.param.freq
+	samplerate = 1.5 * conf.param.chanbw
+	resamplerate = 3 * conf.param.drate
+	if resamplerate > samplerate:
+		samplerate = resamplerate
+		resamplerate = None
+
+	return FMConfig(freq, samplerate, resamplerate)
+
+def dump_stream(conf, sdr):
+	fm = build_fm_conf(conf)
+	p, s = open_fm_stream(sdr, fm)
+
+	try:
+		for addr, payload in parse_stream(s, conf, sdr, fm):
+			print(addr, payload)
+	except KeyboardInterrupt:
+		p.terminate()
+		p.wait()
+
 if __name__ == '__main__':
-	import sys
-	with sys.stdin.buffer as f:
-		parse_stream(f)
+	from optparse import OptionParser
+	import config
+
+	parser = OptionParser(usage = 'usage: %prog [options] [CC2500-config]')
+
+	parser.add_option('-l', '--lo', dest='lo', type='float', help='Downconverter LO frequency')
+	parser.add_option('-g', '--gain', dest='gain', type='float', help='RTL-SDR tuner gain')
+	parser.add_option('-p', '--ppm', dest='ppm', type='float', help='RTL-SDR ppm error')
+
+	parser.set_defaults(lo=0, gain=0, ppm=0)
+
+	opts, args = parser.parse_args()
+
+	# Note: With RTL-SDR you *need* a downconverter to reach 2.4GHz
+	sdr = SDRConfig(opts.ppm, opts.lo, opts.gain)
+	if not args:
+		conf = config.CC2500Config()
+	else:
+		conf = config.CC2500Config.fromhex(*args)
+
+	dump_stream(conf, sdr)
 
