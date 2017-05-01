@@ -42,16 +42,24 @@ def make_parser(conf):
 	length_mode = conf.field.LENGTH_CONFIG
 	own_addr = conf.field.DEVICE_ADDR
 
-	assert addr_mode == 0, 'Address not supported (yet)'
-	assert length_mode == 1, 'Fixed length not supported (yet)'
 	assert not conf.field.CC2400_EN, 'CC2400 mode not supported (yet)'
 	assert length_mode in {0, 1}, 'Infinite packet length not supported'
 	assert not conf.field.MANCHESTER_EN, 'Manchester encoding not supported (yet)'
 	assert not conf.field.FEC_EN, 'FEC not supported (yet)'
 
 	preamble, sync_word = get_sync_data(conf)
+	length_size = int(length_mode == 1)
+	addr_size = int(addr_mode != 0)
+	crc_size = 2 * crc_en
 
-	base_size = len(preamble) + len(sync_word) + 1 + (2 if crc_en else 0)
+	valid_addrs = {own_addr}
+	if addr_mode > 1:
+		valid_addrs.add(0x00)
+	if addr_mode > 2:
+		valid_addrs.add(0xff)
+
+	# The size that needs to be added to the length of the payload returned by parse() to get the full raw size
+	base_size = len(preamble) + len(sync_word) + length_size + addr_size + crc_size
 
 	def parse(data):
 		assert data[:len(preamble)] == preamble
@@ -62,17 +70,21 @@ def make_parser(conf):
 		if white_data:
 			data = bytes(map(operator.xor, data, whitening_seq()))
 
-		length = data[0]
-		assert length <= own_length
+		length = own_length
+		if length_size:
+			length = data[0]
+			assert length <= own_length
 
 		addr = None
-
-		data = data[:length+1+2]
+		if addr_size:
+			addr = data[length_size]
+			assert addr in valid_addrs
 
 		if crc_en:
+			data = data[:length_size+length+crc_size]
 			assert crc16(data) == 0
 
-		payload = data[1:length+1]
+		payload = data[length_size+addr_size:length_size+length]
 
 		return (addr, payload)
 
