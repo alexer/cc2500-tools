@@ -21,6 +21,19 @@ def _crc(degree, poly, crcval, data, data_bits):
 def crc16(data):
 	return _crc(16, 0x8005, 0xffff, int(binascii.hexlify(data), 16), 8 * len(data)) & 0xffff
 
+def get_sync_data(conf):
+	preamble = b'\xAA'
+	preamble *= [2, 3, 4, 6, 8, 12, 16, 24][conf.field.NUM_PREAMBLE]
+
+	sync_word = bytes([conf.reg.SYNC1, conf.reg.SYNC0])
+	sync_count = [0, 1, 1, 2][conf.field.SYNC_MODE % 4]
+
+	sync_word *= sync_count
+	if not sync_count:
+		preamble *= 0
+
+	return preamble, sync_word
+
 def make_parser(conf):
 	own_length = conf.field.PACKET_LENGTH
 	addr_mode = conf.field.ADR_CHK
@@ -36,16 +49,9 @@ def make_parser(conf):
 	assert not conf.field.MANCHESTER_EN, 'Manchester encoding not supported (yet)'
 	assert not conf.field.FEC_EN, 'FEC not supported (yet)'
 
-	preamble = b'\xAA'
-	preamble *= [2, 3, 4, 6, 8, 12, 16, 24][conf.field.NUM_PREAMBLE]
+	preamble, sync_word = get_sync_data(conf)
 
-	sync_word = bytes([conf.reg.SYNC1, conf.reg.SYNC0])
-	sync_count = [0, 1, 1, 2][conf.field.SYNC_MODE % 4]
-
-	sync_word *= sync_count
-	if not sync_count:
-		preamble *= 0
-
+	base_size = len(preamble) + len(sync_word) + 1 + (2 if crc_en else 0)
 
 	def parse(data):
 		assert data[:len(preamble)] == preamble
@@ -70,5 +76,5 @@ def make_parser(conf):
 
 		return (addr, payload)
 
-	return parse
+	return base_size, parse
 
