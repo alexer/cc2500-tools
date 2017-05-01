@@ -29,8 +29,9 @@ class SerialSPI:
 		return binascii.unhexlify(rx[2:-2])
 
 class CC2500Control:
-	def __init__(self, spi):
+	def __init__(self, spi, conf=None):
 		self.spi = spi
+		self.conf = conf
 
 	def xfer(self, data, log=True):
 		return self.spi.xfer(data, log=log)
@@ -39,6 +40,10 @@ class CC2500Control:
 		# Reset chip
 		self.xfer(b'\x30')
 		time.sleep(0.1)
+
+		# Write configuration
+		if self.conf:
+			self.xfer(b'\x40' + bytes(self.conf.reg_values))
 
 		# CRC_AUTOFLUSH=1, APPEND_STATUS=0
 		self.xfer(b'\x07\x08')
