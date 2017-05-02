@@ -1,0 +1,12 @@
+This library contains various tools for working with CC2500 wireless transceivers:
+- Configuration parsing/modification
+- Parsing packets as seen on the air (after demodulation)
+- Live parsing of packets from an RTL-SDR device
+- Simple rx/tx over an SPI bridge
+
+I have minimal experience at best of working with RF; for example, the packet
+detection code in parse_stream() has no provisions for keeping synchronized with
+the packets beyond the initial bit/byte synchronization. (ie. the preamble and
+sync words) As such, any contributions to the RF-facing parts of this library by
+anyone knowledgeable about those things are especially welcome.
+

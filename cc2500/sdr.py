@@ -1,7 +1,7 @@
 import subprocess
 import struct
 
-import parse
+from . import parse
 
 N = 1024
 
@@ -169,7 +169,7 @@ def dump_stream(conf, sdr):
 
 if __name__ == '__main__':
 	from optparse import OptionParser
-	import config
+	from . import config
 
 	parser = OptionParser(usage = 'usage: %prog [options] [CC2500-config]')
 
